@@ -375,6 +375,30 @@ sensor:
                 id: brightness_label
                 text: !lambda 'return str_sprintf("%.0f%%", x / 255.0f * 100.0f);'
 
+  - platform: homeassistant
+    id: solar_pv_power
+    entity_id: sensor.sigen_inverter_pv_power
+    on_value:
+      - lvgl.label.update:
+          id: solar_pv_value
+          text: !lambda 'return str_sprintf("%.2f kW", x);'
+
+  - platform: homeassistant
+    id: solar_load_power
+    entity_id: sensor.sigen_storage_plant_active_power
+    on_value:
+      - lvgl.label.update:
+          id: solar_load_value
+          text: !lambda 'return str_sprintf("%.2f kW", x);'
+
+  - platform: homeassistant
+    id: solar_battery_soc
+    entity_id: sensor.sigen_storage_battery_state_of_charge
+    on_value:
+      - lvgl.label.update:
+          id: solar_battery_value
+          text: !lambda 'return str_sprintf("%.0f%%", x);'
+
 text_sensor:
   - platform: homeassistant
     id: climate_hvac_mode
@@ -717,9 +741,45 @@ lvgl:
       bg_color: 0x1A2E1F
       widgets:
         - label:
-            text: "Solar"
+            text: "PV Output"
             align: CENTER
-            text_color: 0xFFFFFF
+            y: -67
+            text_color: 0x808080
+            text_font: montserrat_12
+        - label:
+            id: solar_pv_value
+            text: "--.- kW"
+            align: CENTER
+            y: -45
+            text_color: 0xFFD23F
+            text_font: montserrat_24
+
+        - label:
+            text: "Load"
+            align: CENTER
+            y: -12
+            text_color: 0x808080
+            text_font: montserrat_12
+        - label:
+            id: solar_load_value
+            text: "--.- kW"
+            align: CENTER
+            y: 10
+            text_color: 0xFF8C42
+            text_font: montserrat_24
+
+        - label:
+            text: "Battery"
+            align: CENTER
+            y: 43
+            text_color: 0x808080
+            text_font: montserrat_12
+        - label:
+            id: solar_battery_value
+            text: "--%"
+            align: CENTER
+            y: 65
+            text_color: 0x4ECB71
             text_font: montserrat_24
 
         - obj:
