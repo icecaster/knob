@@ -27,6 +27,10 @@ logger:
   #baud_rate: 0
 
 api:
+  on_client_connected:
+    - lvgl.page.show: page_climate
+  on_client_disconnected:
+    - lvgl.page.show: page_loading
 
 globals:
   - id: pending_target_temp
@@ -49,6 +53,41 @@ globals:
     restore_value: false
     initial_value: 'false'
 
+  - id: last_hvac_mode
+    type: std::string
+    restore_value: false
+    initial_value: '"heat"'
+
+  - id: suppress_hvac_dropdown_event
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: suppress_fan_dropdown_event
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: encoder_steps
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: pending_brightness
+    type: float
+    restore_value: false
+    initial_value: '50.0'
+
+  - id: last_activity_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: screen_state
+    type: int
+    restore_value: false
+    initial_value: '0'
+
 script:
   - id: send_target_temp
     mode: restart
@@ -59,6 +98,56 @@ script:
           data:
             entity_id: climate.hitachi_heatpump
             temperature: !lambda 'return to_string((int) id(pending_target_temp));'
+
+  - id: send_brightness
+    mode: restart
+    then:
+      - delay: 800ms
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: light.living_room_flat
+            brightness_pct: !lambda 'return to_string((int) id(pending_brightness));'
+
+  - id: wake_screen
+    then:
+      - globals.set:
+          id: screen_state
+          value: '0'
+      - globals.set:
+          id: last_activity_ms
+          value: !lambda 'return millis();'
+      - light.turn_on:
+          id: back_light
+          brightness: 100%
+      - lvgl.resume:
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return (millis() - id(last_activity_ms) >= 300000) && id(screen_state) != 2;
+          then:
+            - globals.set:
+                id: screen_state
+                value: '2'
+            - light.turn_off: back_light
+            - lvgl.pause:
+      - if:
+          condition:
+            lambda: |-
+              uint32_t elapsed = millis() - id(last_activity_ms);
+              return elapsed >= 120000 && elapsed < 300000 && id(screen_state) == 0;
+          then:
+            - globals.set:
+                id: screen_state
+                value: '1'
+            - light.turn_on:
+                id: back_light
+                brightness: 5%
+            - lvgl.pause:
 
 ota:
   - platform: esphome
@@ -125,6 +214,43 @@ binary_sensor:
     filters:
       - delayed_on: 15ms
       - delayed_off: 15ms
+    on_press:
+      - lambda: 'id(last_activity_ms) = millis();'
+      - if:
+          condition:
+            lambda: 'return id(screen_state) != 0;'
+          then:
+            - script.execute: wake_screen
+          else:
+            - if:
+                condition:
+                  lvgl.page.is_showing: page_climate
+                then:
+                  - if:
+                      condition:
+                        text_sensor.state:
+                          id: climate_hvac_mode
+                          state: "off"
+                      then:
+                        - homeassistant.service:
+                            service: climate.set_hvac_mode
+                            data:
+                              entity_id: climate.hitachi_heatpump
+                              hvac_mode: !lambda 'return id(last_hvac_mode);'
+                      else:
+                        - homeassistant.service:
+                            service: climate.set_hvac_mode
+                            data:
+                              entity_id: climate.hitachi_heatpump
+                              hvac_mode: "off"
+            - if:
+                condition:
+                  lvgl.page.is_showing: page_lighting
+                then:
+                  - homeassistant.service:
+                      service: light.toggle
+                      data:
+                        entity_id: light.living_room_flat
 
 sensor:
   - platform: rotary_encoder
@@ -144,30 +270,67 @@ sensor:
     filters:
       - debounce: 20ms
     on_value:
-      - lambda: |-
-          int count = (int) x;
-          if (!id(encoder_initialized)) {
-            id(encoder_initialized) = true;
-            id(encoder_last_count) = count;
-            return;
-          }
-          int delta = count - id(encoder_last_count);
-          id(encoder_last_count) = count;
-          id(encoder_accum) += delta;
-          int steps = id(encoder_accum) / 4;
-          if (steps == 0) return;
-          id(encoder_accum) -= steps * 4;
-          float new_temp = id(pending_target_temp) + steps;
-          if (new_temp < 10) new_temp = 10;
-          if (new_temp > 32) new_temp = 32;
-          id(pending_target_temp) = new_temp;
-      - lvgl.arc.update:
-          id: temp_arc
-          value: !lambda 'return id(pending_target_temp);'
-      - lvgl.label.update:
-          id: target_temp_label
-          text: !lambda 'return str_sprintf("%.0f°", id(pending_target_temp));'
-      - script.execute: send_target_temp
+      - lambda: 'id(last_activity_ms) = millis();'
+      - if:
+          condition:
+            lambda: 'return id(screen_state) != 0;'
+          then:
+            - lambda: |-
+                id(encoder_last_count) = (int) x;
+                id(encoder_accum) = 0;
+            - script.execute: wake_screen
+          else:
+            - lambda: |-
+                id(encoder_steps) = 0;
+                int count = (int) x;
+                if (!id(encoder_initialized)) {
+                  id(encoder_initialized) = true;
+                  id(encoder_last_count) = count;
+                  return;
+                }
+                int delta = count - id(encoder_last_count);
+                id(encoder_last_count) = count;
+                id(encoder_accum) += delta;
+                int steps = id(encoder_accum) / 4;
+                if (steps == 0) return;
+                id(encoder_accum) -= steps * 4;
+                id(encoder_steps) = steps;
+            - if:
+                condition:
+                  and:
+                    - lambda: 'return id(encoder_steps) != 0;'
+                    - lvgl.page.is_showing: page_climate
+                then:
+                  - lambda: |-
+                      float new_temp = id(pending_target_temp) + id(encoder_steps);
+                      if (new_temp < 10) new_temp = 10;
+                      if (new_temp > 32) new_temp = 32;
+                      id(pending_target_temp) = new_temp;
+                  - lvgl.arc.update:
+                      id: temp_arc
+                      value: !lambda 'return id(pending_target_temp);'
+                  - lvgl.label.update:
+                      id: target_temp_label
+                      text: !lambda 'return str_sprintf("%.0f°", id(pending_target_temp));'
+                  - script.execute: send_target_temp
+            - if:
+                condition:
+                  and:
+                    - lambda: 'return id(encoder_steps) != 0;'
+                    - lvgl.page.is_showing: page_lighting
+                then:
+                  - lambda: |-
+                      float new_brightness = id(pending_brightness) + id(encoder_steps) * 4;
+                      if (new_brightness < 1) new_brightness = 1;
+                      if (new_brightness > 100) new_brightness = 100;
+                      id(pending_brightness) = new_brightness;
+                  - lvgl.arc.update:
+                      id: brightness_arc
+                      value: !lambda 'return (int) id(pending_brightness);'
+                  - lvgl.label.update:
+                      id: brightness_label
+                      text: !lambda 'return str_sprintf("%.0f%%", id(pending_brightness));'
+                  - script.execute: send_brightness
 
   - platform: homeassistant
     id: climate_current_temp
@@ -193,23 +356,66 @@ sensor:
           id: pending_target_temp
           value: !lambda 'return x;'
 
+  - platform: homeassistant
+    id: light_brightness
+    entity_id: light.living_room_flat
+    attribute: brightness
+    on_value:
+      - if:
+          condition:
+            lambda: 'return !isnan(x);'
+          then:
+            - globals.set:
+                id: pending_brightness
+                value: !lambda 'return x / 255.0f * 100.0f;'
+            - lvgl.arc.update:
+                id: brightness_arc
+                value: !lambda 'return (int) (x / 255.0f * 100.0f);'
+            - lvgl.label.update:
+                id: brightness_label
+                text: !lambda 'return str_sprintf("%.0f%%", x / 255.0f * 100.0f);'
+
 text_sensor:
   - platform: homeassistant
     id: climate_hvac_mode
     entity_id: climate.hitachi_heatpump
     on_value:
+      - globals.set:
+          id: suppress_hvac_dropdown_event
+          value: 'true'
       - lvgl.dropdown.update:
           id: hvac_mode_dropdown
           selected_text: !lambda 'return x;'
+      - globals.set:
+          id: suppress_hvac_dropdown_event
+          value: 'false'
+      - lambda: |-
+          if (x != "off") {
+            id(last_hvac_mode) = x;
+          }
 
   - platform: homeassistant
     id: climate_fan_mode
     entity_id: climate.hitachi_heatpump
     attribute: fan_mode
     on_value:
+      - globals.set:
+          id: suppress_fan_dropdown_event
+          value: 'true'
       - lvgl.dropdown.update:
           id: fan_mode_dropdown
           selected_text: !lambda 'return x;'
+      - globals.set:
+          id: suppress_fan_dropdown_event
+          value: 'false'
+
+  - platform: homeassistant
+    id: light_state
+    entity_id: light.living_room_flat
+    on_value:
+      - lvgl.label.update:
+          id: light_state_label
+          text: !lambda 'return x == "on" ? std::string("ON") : std::string("OFF");'
 
 touchscreen:
   id: touchscreen_id
@@ -219,6 +425,13 @@ touchscreen:
   interrupt_pin: GPIO5
   reset_pin: GPIO13
   skip_probe: true
+  on_touch:
+    - lambda: 'id(last_activity_ms) = millis();'
+    - if:
+        condition:
+          lambda: 'return id(screen_state) != 0;'
+        then:
+          - script.execute: wake_screen
 
 display:
   id: display_id
@@ -244,6 +457,28 @@ lvgl:
   page_wrap: true
 
   pages:
+    - id: page_loading
+      bg_color: 0x1A1A2E
+      skip: true
+      widgets:
+        - spinner:
+            align: CENTER
+            y: -15
+            width: 50
+            height: 50
+            arc_length: 60deg
+            spin_time: 1s
+            arc_color: 0xFF8C42
+            indicator:
+              arc_color: 0xFF8C42
+        - label:
+            text: "Connecting..."
+            align: CENTER
+            y: 50
+            text_align: CENTER
+            text_color: 0xAAAAAA
+            text_font: montserrat_12
+
     - id: page_climate
       bg_color: 0x1A1A2E
       widgets:
@@ -277,14 +512,6 @@ lvgl:
                   text_color: 0xAAAAAA
                   text_font: montserrat_12
 
-        - label:
-            text: "Mode"
-            align: TOP_MID
-            x: -48
-            y: 158
-            text_color: 0x808080
-            text_font: montserrat_12
-
         - dropdown:
             id: hvac_mode_dropdown
             align: TOP_MID
@@ -313,19 +540,15 @@ lvgl:
               - "dry"
               - "fan_only"
             on_value:
-              - homeassistant.service:
-                  service: climate.set_hvac_mode
-                  data:
-                    entity_id: climate.hitachi_heatpump
-                    hvac_mode: !lambda 'return text;'
-
-        - label:
-            text: "Fan"
-            align: TOP_MID
-            x: 48
-            y: 158
-            text_color: 0x808080
-            text_font: montserrat_12
+              - if:
+                  condition:
+                    lambda: 'return !id(suppress_hvac_dropdown_event);'
+                  then:
+                    - homeassistant.service:
+                        service: climate.set_hvac_mode
+                        data:
+                          entity_id: climate.hitachi_heatpump
+                          hvac_mode: !lambda 'return text;'
 
         - dropdown:
             id: fan_mode_dropdown
@@ -355,11 +578,56 @@ lvgl:
               - "high"
               - "auto"
             on_value:
-              - homeassistant.service:
-                  service: climate.set_fan_mode
-                  data:
-                    entity_id: climate.hitachi_heatpump
-                    fan_mode: !lambda 'return text;'
+              - if:
+                  condition:
+                    lambda: 'return !id(suppress_fan_dropdown_event);'
+                  then:
+                    - homeassistant.service:
+                        service: climate.set_fan_mode
+                        data:
+                          entity_id: climate.hitachi_heatpump
+                          fan_mode: !lambda 'return text;'
+
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0xFF8C42
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: -27
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: -9
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: 9
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: 27
+            y: -12
 
       on_swipe_left:
         - lvgl.page.next:
@@ -369,11 +637,77 @@ lvgl:
     - id: page_lighting
       bg_color: 0x2E2A1A
       widgets:
-        - label:
-            text: "Lighting"
-            align: CENTER
-            text_color: 0xFFFFFF
-            text_font: montserrat_24
+        - arc:
+            id: brightness_arc
+            align: TOP_MID
+            y: 15
+            width: 140
+            height: 140
+            min_value: 0
+            max_value: 100
+            start_angle: 135
+            end_angle: 45
+            value: 50
+            adjustable: false
+            arc_color: 0xFFD23F
+            widgets:
+              - label:
+                  id: brightness_label
+                  text: "50%"
+                  align: CENTER
+                  y: -10
+                  text_color: 0xFFFFFF
+                  text_font: montserrat_40
+
+              - label:
+                  id: light_state_label
+                  text: "--"
+                  align: CENTER
+                  y: 28
+                  text_color: 0xAAAAAA
+                  text_font: montserrat_12
+
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: -27
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0xFFD23F
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: -9
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: 9
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: 27
+            y: -12
+
       on_swipe_left:
         - lvgl.page.next:
       on_swipe_right:
@@ -387,6 +721,48 @@ lvgl:
             align: CENTER
             text_color: 0xFFFFFF
             text_font: montserrat_24
+
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: -27
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: -9
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x4ECB71
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: 9
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: 27
+            y: -12
+
       on_swipe_left:
         - lvgl.page.next:
       on_swipe_right:
@@ -400,6 +776,48 @@ lvgl:
             align: CENTER
             text_color: 0xFFFFFF
             text_font: montserrat_24
+
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: -27
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: -9
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0x444444
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: 9
+            y: -12
+        - obj:
+            width: 8
+            height: 8
+            radius: 4
+            bg_color: 0xC77DFF
+            bg_opa: COVER
+            border_width: 0
+            align: BOTTOM_MID
+            x: 27
+            y: -12
+
       on_swipe_left:
         - lvgl.page.next:
       on_swipe_right:
