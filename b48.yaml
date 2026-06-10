@@ -11,7 +11,10 @@ esphome:
       - output.turn_on: gpio1_screen
       - light.turn_on:
           id: back_light
-          brightness: 1
+          brightness: !lambda 'return id(saved_brightness) / 100.0;'
+      - lvgl.label.update:
+          id: backlight_label
+          text: !lambda 'return str_sprintf("%.0f%%", id(saved_brightness));'
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -88,6 +91,11 @@ globals:
     restore_value: false
     initial_value: '0'
 
+  - id: saved_brightness
+    type: float
+    restore_value: true
+    initial_value: '100.0'
+
 script:
   - id: send_target_temp
     mode: restart
@@ -119,7 +127,7 @@ script:
           value: !lambda 'return millis();'
       - light.turn_on:
           id: back_light
-          brightness: 100%
+          brightness: !lambda 'return id(saved_brightness) / 100.0;'
       - lvgl.resume:
 
 interval:
@@ -146,7 +154,7 @@ interval:
                 value: '1'
             - light.turn_on:
                 id: back_light
-                brightness: 5%
+                brightness: 10%
             - lvgl.pause:
 
 ota:
@@ -331,6 +339,26 @@ sensor:
                       id: brightness_label
                       text: !lambda 'return str_sprintf("%.0f%%", id(pending_brightness));'
                   - script.execute: send_brightness
+            - if:
+                condition:
+                  and:
+                    - lambda: 'return id(encoder_steps) != 0;'
+                    - lvgl.page.is_showing: page_settings
+                then:
+                  - lambda: |-
+                      float new_brightness = id(saved_brightness) + id(encoder_steps);
+                      if (new_brightness < 10) new_brightness = 10;
+                      if (new_brightness > 100) new_brightness = 100;
+                      id(saved_brightness) = new_brightness;
+                  - lvgl.slider.update:
+                      id: backlight_slider
+                      value: !lambda 'return (int) id(saved_brightness);'
+                  - lvgl.label.update:
+                      id: backlight_label
+                      text: !lambda 'return str_sprintf("%.0f%%", id(saved_brightness));'
+                  - light.turn_on:
+                      id: back_light
+                      brightness: !lambda 'return id(saved_brightness) / 100.0;'
 
   - platform: homeassistant
     id: climate_current_temp
@@ -663,10 +691,9 @@ lvgl:
       widgets:
         - arc:
             id: brightness_arc
-            align: TOP_MID
-            y: 15
-            width: 140
-            height: 140
+            align: CENTER
+            width: 168
+            height: 168
             min_value: 0
             max_value: 100
             start_angle: 135
@@ -832,10 +859,43 @@ lvgl:
       bg_color: 0x2A1A2E
       widgets:
         - label:
-            text: "Settings"
+            text: "Backlight"
             align: CENTER
+            y: -50
+            text_color: 0x808080
+            text_font: montserrat_12
+
+        - label:
+            id: backlight_label
+            text: "100%"
+            align: CENTER
+            y: -22
             text_color: 0xFFFFFF
             text_font: montserrat_24
+
+        - slider:
+            id: backlight_slider
+            align: CENTER
+            y: 25
+            width: 170
+            height: 16
+            min_value: 10
+            max_value: 100
+            value: !lambda 'return id(saved_brightness);'
+            bg_color: 0x2A2A3E
+            indicator:
+              bg_color: 0xC77DFF
+            knob:
+              bg_color: 0xC77DFF
+            on_value:
+              - lambda: 'id(last_activity_ms) = millis();'
+              - lambda: 'id(saved_brightness) = x;'
+              - light.turn_on:
+                  id: back_light
+                  brightness: !lambda 'return x / 100.0;'
+              - lvgl.label.update:
+                  id: backlight_label
+                  text: !lambda 'return str_sprintf("%.0f%%", x);'
 
         - obj:
             width: 8
